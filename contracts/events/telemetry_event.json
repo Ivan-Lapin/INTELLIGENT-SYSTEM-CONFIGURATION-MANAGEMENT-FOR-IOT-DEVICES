@@ -1,0 +1,11 @@
+{
+  "deviceId": "d-123",
+  "ts": "2026-02-25T12:00:00Z",
+  "metrics": {
+    "latency_ms": 21.3,
+    "loss": 0.01,
+    "jitter_ms": 4.2,
+    "rssi": -61,
+    "battery": 0.77
+  }
+}
