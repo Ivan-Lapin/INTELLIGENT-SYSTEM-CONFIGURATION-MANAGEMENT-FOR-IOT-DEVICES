@@ -1,0 +1,32 @@
+services:
+  device-registry:
+    build:
+      context: .
+      dockerfile: services/device-registry/Dockerfile
+    container_name: device_registry
+    environment:
+      APP_PORT: 8081
+      POSTGRES_DSN: ${POSTGRES_DSN}
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  config-service:
+    build:
+      context: .
+      dockerfile: services/config-service/Dockerfile
+    container_name: config_service
+    environment:
+      APP_PORT: 8082
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MONGO_URI: ${MONGO_URI}
+      MONGO_DB: ${MONGO_DB}
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy

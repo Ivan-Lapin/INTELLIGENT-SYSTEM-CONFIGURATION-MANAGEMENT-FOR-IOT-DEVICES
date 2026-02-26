@@ -1,7 +1,7 @@
-.PHONY: up down logs ps health restart
-
 -include .env
 export
+
+.PHONY: up down logs ps health restart
 
 up:
 	docker compose up -d
@@ -20,3 +20,18 @@ ps:
 
 health:
 	./tools/scripts/healthcheck.sh
+
+
+.PHONY: up_all down_all rebuild_all logs_all
+
+up_all:
+	docker compose -f docker-compose.yml -f docker-compose.services.yml up -d --build
+
+down_all:
+	docker compose -f docker-compose.yml -f docker-compose.services.yml down
+
+rebuild_all:
+	docker compose -f docker-compose.yml -f docker-compose.services.yml up -d --build --force-recreate
+
+logs_all:
+	docker compose -f docker-compose.yml -f docker-compose.services.yml logs -f --tail=200
