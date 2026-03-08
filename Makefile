@@ -33,5 +33,9 @@ down_all:
 rebuild_all:
 	docker compose -f docker-compose.yml -f docker-compose.services.yml up -d --build --force-recreate
 
+reset_all:
+	docker compose -f docker-compose.yml -f docker-compose.services.yml down -v
+	docker compose -f docker-compose.yml -f docker-compose.services.yml up -d --build
+
 logs_all:
 	docker compose -f docker-compose.yml -f docker-compose.services.yml logs -f --tail=200

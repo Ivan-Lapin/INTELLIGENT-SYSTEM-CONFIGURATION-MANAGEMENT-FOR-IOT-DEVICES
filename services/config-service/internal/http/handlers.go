@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -54,15 +56,20 @@ func (h *Handlers) CreateTemplate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	mongoID := res.InsertedID
 
 	// 2) Postgres meta
 	var id string
+	oid, ok := res.InsertedID.(primitive.ObjectID)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mongo inserted id is not ObjectID"})
+		return
+	}
+	mongoHex := oid.Hex()
 	err = h.pg.QueryRow(ctx, `
 		INSERT INTO cfg.config_templates (name, device_type, schema_version, mongo_template_id)
 		VALUES ($1, $2, 1, $3)
 		RETURNING id
-	`, req.Name, req.DeviceType, toString(mongoID)).Scan(&id)
+	`, req.Name, req.DeviceType, mongoHex).Scan(&id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -106,49 +113,87 @@ func (h *Handlers) CreateVersion(c *gin.Context) {
 		return
 	}
 
-	// checksum от payload (детерминированно)
 	raw, _ := json.Marshal(req.Payload)
 	sum := sha256.Sum256(raw)
 	checksum := hex.EncodeToString(sum[:])
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
-	// 1) вычислим следующий version для template
+	tx, err := h.pg.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pg begin: " + err.Error()})
+		return
+	}
+	defer tx.Rollback(ctx) // no-op after commit
+
+	// 0) блокируем template row, чтобы сериализовать вычисление next version
+	var templateExists bool
+	err = tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM cfg.config_templates WHERE id = $1 FOR UPDATE)
+	`, req.TemplateID).Scan(&templateExists)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pg lock template: " + err.Error()})
+		return
+	}
+	if !templateExists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "template not found"})
+		return
+	}
+
+	// 1) next version в Postgres (под блокировкой)
 	var next int
-	err := h.pg.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(version), 0) + 1
 		FROM cfg.config_versions
 		WHERE template_id = $1
 	`, req.TemplateID).Scan(&next)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pg next version: " + err.Error()})
 		return
 	}
 
-	// 2) Mongo doc
+	// 2) детерминированный ID Mongo-документа
+	mongoDocID := fmt.Sprintf("%s:%d", req.TemplateID, next)
+
+	// 3) Пишем в Mongo (idempotent по _id)
 	doc := bson.M{
-		"templateId": req.TemplateID,
+		"_id":        mongoDocID,
+		"templateId": req.TemplateID, // (опционально, но полезно для индексов/поиска)
 		"version":    next,
 		"payload":    req.Payload,
 		"checksum":   checksum,
 		"createdAt":  time.Now().UTC(),
 	}
-	res, err := h.mdb.Collection("config_versions").InsertOne(ctx, doc)
+
+	_, mongoErr := h.mdb.Collection("config_versions").InsertOne(ctx, doc)
+	if mongoErr != nil {
+		// Если это duplicate по _id — считаем идемпотентным успехом
+		if !isMongoDuplicateKey(mongoErr) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "mongo insert: " + mongoErr.Error()})
+			return
+		}
+		// иначе ок: документ уже есть
+	}
+
+	// 4) Пишем метаданные в Postgres, mongo_version_id = mongoDocID
+	var id string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO cfg.config_versions (template_id, version, checksum, mongo_version_id)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (template_id, version)
+		DO UPDATE SET checksum = EXCLUDED.checksum, mongo_version_id = EXCLUDED.mongo_version_id
+		RETURNING id;
+	`, req.TemplateID, next, checksum, mongoDocID).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// Важно: если PG insert упал, мы rollback'аем tx.
+		// Mongo-документ мог уже существовать — и это нормально, он идемпотентный.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pg insert: " + err.Error()})
 		return
 	}
 
-	// 3) Postgres meta
-	var id string
-	err = h.pg.QueryRow(ctx, `
-		INSERT INTO cfg.config_versions (template_id, version, checksum, mongo_version_id)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id
-	`, req.TemplateID, next, checksum, toString(res.InsertedID)).Scan(&id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pg commit: " + err.Error()})
 		return
 	}
 
@@ -157,6 +202,19 @@ func (h *Handlers) CreateVersion(c *gin.Context) {
 		"version":  next,
 		"checksum": checksum,
 	})
+}
+
+// isMongoDuplicateKey: проверка E11000
+func isMongoDuplicateKey(err error) bool {
+	var we mongo.WriteException
+	if errors.As(err, &we) {
+		for _, e := range we.WriteErrors {
+			if e.Code == 11000 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *Handlers) ListVersions(c *gin.Context) {

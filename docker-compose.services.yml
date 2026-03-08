@@ -30,3 +30,95 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+
+  mqtt-adapter:
+    build:
+      context: .
+      dockerfile: services/mqtt-adapter/Dockerfile
+    container_name: mqtt_adapter
+    environment:
+      APP_PORT: 8083
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MONGO_URI: ${MONGO_URI}
+      MONGO_DB: ${MONGO_DB}
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_CLIENT_ID: mqtt-adapter
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+
+  device-sim-1:
+    build:
+      context: .
+      dockerfile: services/device-simulator/Dockerfile
+    image: device-sim-1:latest
+    container_name: device_sim_1
+    environment:
+      DEVICE_ID: e1445dc6-17e7-4b52-9b60-e091dee665d8
+      MQTT_BROKER_HOST: mosquitto
+      MQTT_BROKER_PORT: 1883
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+  deployment-orchestrator:
+    build:
+      context: .
+      dockerfile: services/deployment-orchestrator/Dockerfile
+    container_name: deployment_orchestrator
+    environment:
+      APP_PORT: 8084
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MQTT_ADAPTER_URL: http://mqtt-adapter:8083
+    ports:
+      - "8084:8084"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mqtt-adapter:
+        condition: service_started
+
+
+  telemetry-ingestor:
+    build:
+      context: .
+      dockerfile: services/telemetry-ingestor/Dockerfile
+    container_name: telemetry_ingestor
+    environment:
+      APP_PORT: 8085
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_CLIENT_ID: telemetry-ingestor
+    ports:
+      - "8085:8085"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+
+  ml-service:
+    build:
+      context: .
+      dockerfile: services/ml-service/Dockerfile
+    container_name: ml_service
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MODEL_DIR: /app/model_artifacts
+      WINDOW_SIZE: 12
+    ports:
+      - "8086:8086"
+    volumes:
+      - ml_model_data:/app/model_artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  ml_model_data:
