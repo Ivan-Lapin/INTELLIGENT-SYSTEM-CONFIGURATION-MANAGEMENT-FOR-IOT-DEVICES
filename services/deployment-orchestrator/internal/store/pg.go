@@ -171,3 +171,13 @@ func nullIfEmpty(s string) any {
 	}
 	return s
 }
+
+func (p *PG) GetDeviceProtocol(ctx context.Context, deviceID string) (string, error) {
+	var protocol string
+	err := p.Pool.QueryRow(ctx, `
+		SELECT protocol
+		FROM registry.devices
+		WHERE id = $1
+	`, deviceID).Scan(&protocol)
+	return protocol, err
+}

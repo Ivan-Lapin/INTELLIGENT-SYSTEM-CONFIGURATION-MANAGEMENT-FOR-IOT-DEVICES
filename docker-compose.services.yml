@@ -76,12 +76,17 @@ services:
       APP_PORT: 8084
       POSTGRES_DSN: ${POSTGRES_DSN}
       MQTT_ADAPTER_URL: http://mqtt-adapter:8083
+      ML_SERVICE_URL: http://ml-service:8086
+      TWIN_SERVICE_URL: http://digital-twin-service:8087
+      LWM2M_ADAPTER_URL: http://lwm2m-adapter:8088
     ports:
       - "8084:8084"
     depends_on:
       postgres:
         condition: service_healthy
       mqtt-adapter:
+        condition: service_started
+      lwm2m-adapter:
         condition: service_started
 
 
@@ -137,6 +142,35 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+
+
+  lwm2m-adapter:
+    build:
+      context: .
+      dockerfile: services/lwm2m-adapter/Dockerfile
+    container_name: lwm2m_adapter
+    environment:
+      APP_PORT: 8088
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MONGO_URI: ${MONGO_URI}
+      MONGO_DB: ${MONGO_DB}
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_CLIENT_ID: lwm2m-adapter
+    ports:
+      - "8088:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+
+  lwm2m-device-simulator:
+    build:
+      context: .
+      dockerfile: services/lwm2m-device-simulator/Dockerfile
+    image: lwm2m-device-simulator:latest
 
 volumes:
   ml_model_data:
