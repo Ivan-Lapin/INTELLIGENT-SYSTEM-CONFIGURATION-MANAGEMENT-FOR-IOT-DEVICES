@@ -120,5 +120,23 @@ services:
       postgres:
         condition: service_healthy
 
+  digital-twin-service:
+    build:
+      context: .
+      dockerfile: services/digital-twin-service/Dockerfile
+    container_name: digital_twin_service
+    environment:
+      APP_PORT: 8087
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MONGO_URI: ${MONGO_URI}
+      MONGO_DB: ${MONGO_DB}
+    ports:
+      - "8087:8087"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
 volumes:
   ml_model_data:
