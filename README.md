@@ -1,295 +1,313 @@
-# Intelligent IoT Configuration Management System (Prototype)
+# Intelligent System for IoT Configuration Management in 5G Networks
 
-This repository contains a prototype implementation of an **intelligent configuration management system for IoT devices in 5G networks**.
+Prototype of an intelligent system for safe configuration deployment for IoT devices in large-scale networks using **Machine Learning**, **Digital Twin simulation**, and **policy-based deployment orchestration**.
 
-The system is developed as part of the research work:
+This project was developed as a research prototype for the study:
 
-**"Development of a Prototype Intelligent Configuration Management System for IoT Devices in 5G Telecommunication Networks"**
+**“Development of a Prototype Intelligent System for IoT Configuration Management in 5G Telecommunication Networks.”**
 
-The project implements a microservice-based architecture that supports:
+The system demonstrates how configuration deployment in large IoT infrastructures can be improved using predictive risk analysis and staged rollout strategies.
 
-- configuration management for IoT devices
-- controlled configuration deployment
-- telemetry collection
-- QoS prediction using machine learning
+---
 
-The prototype demonstrates how configuration rollout decisions can be supported by **predictive analytics and intelligent orchestration mechanisms**.
+# Motivation
+
+Modern IoT infrastructures may contain **thousands or millions of devices**.
+
+Updating configuration parameters across such networks introduces several risks:
+
+* cascading device failures
+* network instability
+* increased packet loss and latency
+* large-scale outages caused by incorrect configurations
+
+Traditional IoT management platforms typically allow configuration updates but **do not evaluate potential risks before deployment**.
+
+This project proposes an **intelligent deployment pipeline** that evaluates configuration safety before applying it to devices.
+
+---
+
+# Key Idea
+
+The proposed system combines several techniques:
+
+* **Digital Twin simulation** to model device behavior
+* **Machine Learning risk prediction**
+* **Policy-based decision making**
+* **Canary deployment strategies**
+* **IoT telemetry monitoring**
+
+Before a configuration is applied to devices, the system evaluates its potential impact and decides whether the rollout is safe.
 
 ---
 
 # System Architecture
 
-The system is organized as a set of cooperating microservices.
+The platform follows a **microservice architecture**.
 
-Core components:
+Main components:
 
-Device Simulator
-↓
-MQTT Broker (Mosquitto)
-↓
-Telemetry Ingestor
-
-Device Registry ← REST → Configuration Service
-↓
+```
+IoT Devices (MQTT / LwM2M)
+        │
+        ▼
+Telemetry Service
+        │
+        ▼
+ML Risk Prediction + Digital Twin
+        │
+        ▼
 Deployment Orchestrator
-↓
-MQTT Adapter
-↓
-IoT Devices
+        │
+        ▼
+Configuration Management Service
+        │
+        ▼
+Device Registry
+```
 
-Telemetry → PostgreSQL
-Configurations → MongoDB
-
-ML Service (QoS Prediction)
-
-
-The architecture includes the following layers:
-
-### Control Plane
-
-Responsible for device and configuration management.
-
-Services:
-
-- `device-registry`
-- `config-service`
-
-Responsibilities:
-
-- device registration
-- configuration template management
-- configuration versioning
+The orchestrator coordinates configuration deployment using telemetry data, ML risk analysis, and policy rules.
 
 ---
 
-### Delivery Layer
+# Core Components
 
-Responsible for delivering configuration updates to IoT devices.
+## Device Registry
 
-Services:
+Maintains information about IoT devices:
 
-- `mqtt-adapter`
-- `device-simulator`
-
-Responsibilities:
-
-- publishing desired configuration
-- receiving device acknowledgements
-- tracking configuration application status
+* device identifiers
+* protocol type
+* device groups
+* metadata and tags
 
 ---
 
-### Deployment Orchestration
+## Configuration Service
 
-Responsible for safe configuration rollout.
+Responsible for managing configuration lifecycle:
 
-Service:
+* configuration templates
+* configuration versions
+* assignments to devices
+* configuration validation
 
-- `deployment-orchestrator`
-
-Features:
-
-- canary deployment
-- failure rate monitoring
-- automatic rollback decisions
+Configurations are versioned and stored with checksums.
 
 ---
 
-### Telemetry Pipeline
+## Telemetry Service
 
-Responsible for collecting device telemetry.
+Collects telemetry data from devices:
 
-Service:
+* latency
+* packet loss
+* jitter
+* battery state
+* device metrics
 
-- `telemetry-ingestor`
-
-Telemetry data includes:
-
-- latency
-- packet loss
-- jitter
-- RSSI
-- battery level
-
-All telemetry is stored in:
-
-
-PostgreSQL → telemetry.metrics_raw
-
+Telemetry is stored and used for system monitoring and risk prediction.
 
 ---
 
-### Intelligence Layer
+## Deployment Orchestrator
 
-Responsible for predictive analytics.
+Central component that manages configuration rollout.
 
-Service:
+Capabilities:
 
-- `ml-service`
-
-Features:
-
-- LSTM-based QoS degradation prediction
-- telemetry time window analysis
-- risk score estimation
-
-Example response:
-
-
-{
-"deviceId": "...",
-"riskScore": 0.013,
-"riskLevel": "LOW"
-}
-
+* staged rollout
+* canary deployment
+* rollback on failure
+* policy-based decisions
+* integration with ML risk prediction
+* integration with Digital Twin validation
 
 ---
 
-# Technologies
+## ML Risk Prediction Service
 
-The prototype uses the following technologies:
+Machine learning model used to estimate the risk of configuration deployment.
 
-Backend services
-
-- Go (Gin)
-- Python (FastAPI)
-- PyTorch (ML model)
-
-Data storage
-
-- PostgreSQL
-- MongoDB
-- Redis
-
-Messaging
-
-- MQTT (Mosquitto)
-- NATS
-
-Infrastructure
-
-- Docker
-- Docker Compose
+The model analyzes telemetry patterns and predicts the probability that the deployment may cause failures or QoS degradation.
 
 ---
 
-# Implemented Features
+## Digital Twin Service
 
-The current MVP prototype includes:
+Provides a simulated representation of IoT device behavior.
 
-Device management
+The Digital Twin allows:
 
-- device registration
-- device metadata storage
+* validation of configuration changes
+* prediction of network impact
+* estimation of performance changes
 
-Configuration management
-
-- configuration templates
-- versioned configuration payloads
-
-Configuration deployment
-
-- MQTT configuration delivery
-- device acknowledgement processing
-
-Safe rollout mechanisms
-
-- canary deployment
-- automatic deployment monitoring
-- failure-based rollback
-
-Telemetry collection
-
-- real-time telemetry ingestion
-- time-series storage
-
-Machine learning prediction
-
-- LSTM QoS degradation prediction
-- risk scoring based on telemetry data
+This step helps detect potentially dangerous configurations before deployment.
 
 ---
 
-# Example Workflow
+# Deployment Pipeline
 
-Typical system operation:
+The intelligent deployment pipeline works as follows:
 
-1. Register IoT device
-2. Create configuration template
-3. Create configuration version
-4. Deploy configuration using canary strategy
-5. Devices apply configuration and send ACK
-6. Telemetry is continuously collected
-7. ML service predicts QoS degradation risk
-8. Deployment decisions can be adjusted based on prediction
+1. A new configuration version is created
+2. The configuration is validated against the schema
+3. Digital Twin simulates the configuration impact
+4. ML model evaluates deployment risk
+5. Policy engine decides whether deployment is allowed
+6. Canary deployment is executed
+7. If successful, the rollout continues to all devices
+
+This process significantly reduces the probability of large-scale failures.
+
+---
+
+# Supported IoT Protocols
+
+The prototype currently supports:
+
+* **MQTT**
+* **LwM2M**
+
+Adapters allow integration with different types of IoT devices.
+
+---
+
+# Technology Stack
+
+Backend services:
+
+* Go (Golang)
+* Python (ML service)
+
+Infrastructure:
+
+* Docker
+* Docker Compose
+
+Messaging and data flow:
+
+* MQTT broker
+
+Databases:
+
+* PostgreSQL (core system data)
+* MongoDB (configuration documents)
+
+Machine Learning:
+
+* PyTorch
+* time-series telemetry analysis
 
 ---
 
 # Repository Structure
 
-
+```
 services/
+    device-registry/
+    config-service/
+    telemetry-service/
+    deployment-orchestrator/
+    ml-service/
+    digital-twin-service/
+    mqtt-adapter/
+    lwm2m-adapter/
 
-device-registry
-config-service
-mqtt-adapter
-deployment-orchestrator
-telemetry-ingestor
-ml-service
-device-simulator
+simulators/
+    device-simulator/
+    lwm2m-device-simulator/
 
----
+db/
+    postgres/
+    mongo/
 
-# Research Context
-
-This project serves as the practical prototype for research on:
-
-**Intelligent configuration management systems for IoT devices in 5G networks**
-
-Key research topics addressed:
-
-- configuration orchestration
-- safe rollout strategies
-- telemetry-based analytics
-- machine learning for QoS prediction
-- intelligent configuration validation
-
----
-
-# Current Status
-
-Implemented:
-
-- configuration management
-- MQTT configuration delivery
-- canary deployment orchestration
-- telemetry ingestion
-- LSTM-based QoS prediction
-
-Planned improvements:
-
-- Digital Twin module for configuration validation
-- integration of ML predictions into deployment decisions
-- experimental evaluation scenarios
+docker/
+    compose files
+```
 
 ---
 
 # Running the System
 
-Start infrastructure:
+### Requirements
 
-
-docker compose -f docker-compose.yml -f docker-compose.services.yml up -d
+* Docker
+* Docker Compose
+* Go 1.21+
+* Python 3.11+
 
 ---
 
-# Research Demonstration
+### Start all services
 
-The prototype allows demonstration of:
+```
+docker compose up --build
+```
 
-- controlled configuration deployment
-- telemetry-driven system monitoring
-- machine learning-based QoS prediction
-- intelligent configuration management workflows
+This will start:
 
-This system serves as an experimental platform for evaluating intelligent configuration deployment strategies in IoT environments.
+* IoT services
+* databases
+* telemetry pipeline
+* ML service
+* Digital Twin service
+* deployment orchestrator
+
+---
+
+# Example Workflow
+
+Typical system workflow:
+
+1. Register a new device
+2. Create configuration template
+3. Create configuration version
+4. Deploy configuration through orchestrator
+5. Monitor deployment status
+
+Deployment may follow different strategies:
+
+* full rollout
+* canary deployment
+* intelligent deployment with ML and Digital Twin validation
+
+---
+
+# Research Contribution
+
+This prototype demonstrates an approach for improving IoT configuration management using intelligent deployment mechanisms.
+
+Key contributions:
+
+* integration of ML-based risk prediction
+* Digital Twin validation of configurations
+* policy-based deployment orchestration
+* support for multiple IoT protocols
+* microservice architecture for scalability
+
+---
+
+# Limitations
+
+This project is a **research prototype**.
+
+The following limitations exist:
+
+* experiments were conducted in a simulated environment
+* simplified device behavior models
+* limited ML training dataset
+* no integration with real 5G infrastructure yet
+
+---
+
+# Future Work
+
+Possible extensions:
+
+* integration with real 5G networks
+* support for large-scale IoT deployments
+* advanced ML models for anomaly detection
+* adaptive deployment policies
+* reinforcement learning for configuration optimization
