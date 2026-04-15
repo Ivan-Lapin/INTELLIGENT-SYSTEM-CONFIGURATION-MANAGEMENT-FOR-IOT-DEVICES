@@ -38,11 +38,13 @@ func (h *Handlers) PublishDesired(c *gin.Context) {
 	// 1) найти mongo_version_id + checksum в Postgres
 	var mongoVersionID string
 	var checksum string
+	var version int
+
 	err := h.pg.Pool.QueryRow(ctx, `
-		SELECT mongo_version_id, checksum
-		FROM cfg.config_versions
-		WHERE id = $1
-	`, req.ConfigVersionID).Scan(&mongoVersionID, &checksum)
+	SELECT mongo_version_id, checksum, version
+	FROM cfg.config_versions
+	WHERE id = $1
+`, req.ConfigVersionID).Scan(&mongoVersionID, &checksum, &version)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "config version not found: " + err.Error()})
 		return
@@ -56,11 +58,11 @@ func (h *Handlers) PublishDesired(c *gin.Context) {
 	}
 
 	desired := model.DesiredMessage{
-		DeviceID:  req.DeviceID,
-		VersionID: req.ConfigVersionID,
-		Checksum:  checksum,
-		Payload:   doc.Payload,
-		TS:        time.Now().UTC(),
+		Version:         version,
+		ConfigVersionID: req.ConfigVersionID,
+		Checksum:        checksum,
+		Payload:         doc.Payload,
+		TS:              time.Now().UTC(),
 	}
 
 	// 3) записать "sent"

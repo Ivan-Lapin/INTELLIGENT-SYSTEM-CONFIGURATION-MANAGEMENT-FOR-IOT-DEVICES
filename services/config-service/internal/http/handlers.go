@@ -113,6 +113,22 @@ func (h *Handlers) CreateVersion(c *gin.Context) {
 		return
 	}
 
+	if req.Status == "" {
+		req.Status = "draft"
+	}
+	if req.RolloutStrategy == "" {
+		req.RolloutStrategy = "canary"
+	}
+
+	validation := validateBusinessRules(req.Payload)
+	if !validation.Valid {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      "business validation failed",
+			"validation": validation,
+		})
+		return
+	}
+
 	raw, _ := json.Marshal(req.Payload)
 	sum := sha256.Sum256(raw)
 	checksum := hex.EncodeToString(sum[:])
@@ -125,9 +141,8 @@ func (h *Handlers) CreateVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "pg begin: " + err.Error()})
 		return
 	}
-	defer tx.Rollback(ctx) // no-op after commit
+	defer tx.Rollback(ctx)
 
-	// 0) блокируем template row, чтобы сериализовать вычисление next version
 	var templateExists bool
 	err = tx.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM cfg.config_templates WHERE id = $1 FOR UPDATE)
@@ -141,7 +156,6 @@ func (h *Handlers) CreateVersion(c *gin.Context) {
 		return
 	}
 
-	// 1) next version в Postgres (под блокировкой)
 	var next int
 	err = tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(version), 0) + 1
@@ -153,41 +167,83 @@ func (h *Handlers) CreateVersion(c *gin.Context) {
 		return
 	}
 
-	// 2) детерминированный ID Mongo-документа
+	parentVersion := req.ParentVersion
+	if parentVersion == nil && next > 1 {
+		prev := next - 1
+		parentVersion = &prev
+	}
+
+	var oldPayload map[string]any
+	if parentVersion != nil {
+		parentDocID := fmt.Sprintf("%s:%d", req.TemplateID, *parentVersion)
+		var prevDoc bson.M
+		err := h.mdb.Collection("config_versions").FindOne(ctx, bson.M{"_id": parentDocID}).Decode(&prevDoc)
+		if err == nil {
+			if payload, ok := prevDoc["payload"].(map[string]any); ok {
+				oldPayload = payload
+			}
+		}
+	}
+	if oldPayload == nil {
+		oldPayload = map[string]any{}
+	}
+
+	diff := buildDiff(oldPayload, req.Payload)
 	mongoDocID := fmt.Sprintf("%s:%d", req.TemplateID, next)
 
-	// 3) Пишем в Mongo (idempotent по _id)
 	doc := bson.M{
-		"_id":        mongoDocID,
-		"templateId": req.TemplateID, // (опционально, но полезно для индексов/поиска)
-		"version":    next,
-		"payload":    req.Payload,
-		"checksum":   checksum,
-		"createdAt":  time.Now().UTC(),
+		"_id":           mongoDocID,
+		"templateId":    req.TemplateID,
+		"version":       next,
+		"parentVersion": parentVersion,
+		"payload":       req.Payload,
+		"diff":          diff,
+		"checksum":      checksum,
+		"createdAt":     time.Now().UTC(),
 	}
 
 	_, mongoErr := h.mdb.Collection("config_versions").InsertOne(ctx, doc)
-	if mongoErr != nil {
-		// Если это duplicate по _id — считаем идемпотентным успехом
-		if !isMongoDuplicateKey(mongoErr) {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "mongo insert: " + mongoErr.Error()})
-			return
-		}
-		// иначе ок: документ уже есть
+	if mongoErr != nil && !isMongoDuplicateKey(mongoErr) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mongo insert: " + mongoErr.Error()})
+		return
 	}
 
-	// 4) Пишем метаданные в Postgres, mongo_version_id = mongoDocID
 	var id string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO cfg.config_versions (template_id, version, checksum, mongo_version_id)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO cfg.config_versions (
+			template_id,
+			version,
+			checksum,
+			mongo_version_id,
+			parent_version,
+			status,
+			created_by,
+			rollout_strategy,
+			change_summary
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (template_id, version)
-		DO UPDATE SET checksum = EXCLUDED.checksum, mongo_version_id = EXCLUDED.mongo_version_id
-		RETURNING id;
-	`, req.TemplateID, next, checksum, mongoDocID).Scan(&id)
+		DO UPDATE SET
+			checksum = EXCLUDED.checksum,
+			mongo_version_id = EXCLUDED.mongo_version_id,
+			parent_version = EXCLUDED.parent_version,
+			status = EXCLUDED.status,
+			created_by = EXCLUDED.created_by,
+			rollout_strategy = EXCLUDED.rollout_strategy,
+			change_summary = EXCLUDED.change_summary
+		RETURNING id
+	`,
+		req.TemplateID,
+		next,
+		checksum,
+		mongoDocID,
+		parentVersion,
+		req.Status,
+		req.CreatedBy,
+		req.RolloutStrategy,
+		req.ChangeSummary,
+	).Scan(&id)
 	if err != nil {
-		// Важно: если PG insert упал, мы rollback'аем tx.
-		// Mongo-документ мог уже существовать — и это нормально, он идемпотентный.
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "pg insert: " + err.Error()})
 		return
 	}
@@ -198,10 +254,71 @@ func (h *Handlers) CreateVersion(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"id":       id,
-		"version":  next,
-		"checksum": checksum,
+		"id":         id,
+		"version":    next,
+		"checksum":   checksum,
+		"validation": validation,
+		"diff":       diff,
 	})
+}
+
+func (h *Handlers) GetVersion(c *gin.Context) {
+	id := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	var meta model.VersionDetails
+	var mongoVersionID string
+
+	err := h.pg.QueryRow(ctx, `
+		SELECT
+			id,
+			template_id,
+			version,
+			checksum,
+			status,
+			created_by,
+			parent_version,
+			rollout_strategy,
+			change_summary,
+			mongo_version_id,
+			created_at
+		FROM cfg.config_versions
+		WHERE id = $1
+	`, id).Scan(
+		&meta.ID,
+		&meta.TemplateID,
+		&meta.Version,
+		&meta.Checksum,
+		&meta.Status,
+		&meta.CreatedBy,
+		&meta.ParentVersion,
+		&meta.RolloutStrategy,
+		&meta.ChangeSummary,
+		&mongoVersionID,
+		&meta.CreatedAt,
+	)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
+		return
+	}
+
+	var doc bson.M
+	err = h.mdb.Collection("config_versions").FindOne(ctx, bson.M{"_id": mongoVersionID}).Decode(&doc)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mongo version not found"})
+		return
+	}
+
+	if payload, ok := doc["payload"].(map[string]any); ok {
+		meta.Payload = payload
+	}
+	if diff, ok := doc["diff"].(map[string]any); ok {
+		meta.Diff = diff
+	}
+
+	c.JSON(http.StatusOK, meta)
 }
 
 // isMongoDuplicateKey: проверка E11000
@@ -224,7 +341,17 @@ func (h *Handlers) ListVersions(c *gin.Context) {
 	defer cancel()
 
 	q := `
-		SELECT id, template_id, version, checksum, created_at
+		SELECT
+		id,
+		template_id,
+		version,
+		checksum,
+		status,
+		created_by,
+		parent_version,
+		rollout_strategy,
+		change_summary,
+		created_at
 		FROM cfg.config_versions
 	`
 	args := []any{}
@@ -244,7 +371,16 @@ func (h *Handlers) ListVersions(c *gin.Context) {
 	out := make([]model.VersionMeta, 0)
 	for rows.Next() {
 		var v model.VersionMeta
-		if err := rows.Scan(&v.ID, &v.TemplateID, &v.Version, &v.Checksum, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID,
+			&v.TemplateID,
+			&v.Version,
+			&v.Checksum,
+			&v.Status,
+			&v.CreatedBy,
+			&v.ParentVersion,
+			&v.RolloutStrategy,
+			&v.ChangeSummary,
+			&v.CreatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -256,4 +392,142 @@ func (h *Handlers) ListVersions(c *gin.Context) {
 func toString(v any) string {
 	// Mongo ObjectID печатается нормально через %v
 	return fmt.Sprintf("%v", v)
+}
+
+func buildDiff(oldPayload, newPayload map[string]any) map[string]any {
+	diff := make(map[string]any)
+
+	for k, newVal := range newPayload {
+		oldVal, exists := oldPayload[k]
+		if !exists {
+			diff[k] = map[string]any{
+				"old": nil,
+				"new": newVal,
+			}
+			continue
+		}
+		if fmt.Sprintf("%v", oldVal) != fmt.Sprintf("%v", newVal) {
+			diff[k] = map[string]any{
+				"old": oldVal,
+				"new": newVal,
+			}
+		}
+	}
+
+	for k, oldVal := range oldPayload {
+		if _, exists := newPayload[k]; !exists {
+			diff[k] = map[string]any{
+				"old": oldVal,
+				"new": nil,
+			}
+		}
+	}
+
+	return diff
+}
+
+func validateBusinessRules(payload map[string]any) model.ValidationResult {
+	res := model.ValidationResult{
+		Valid:    true,
+		Errors:   []string{},
+		Warnings: []string{},
+	}
+
+	if v, ok := payload["report_interval"]; ok {
+		switch val := v.(type) {
+		case float64:
+			if val < 1 {
+				res.Valid = false
+				res.Errors = append(res.Errors, "report_interval must be >= 1")
+			}
+			if val < 5 {
+				res.Warnings = append(res.Warnings, "very low report_interval may increase network load")
+			}
+		case int:
+			if val < 1 {
+				res.Valid = false
+				res.Errors = append(res.Errors, "report_interval must be >= 1")
+			}
+			if val < 5 {
+				res.Warnings = append(res.Warnings, "very low report_interval may increase network load")
+			}
+		}
+	}
+
+	if v, ok := payload["retry_limit"]; ok {
+		switch val := v.(type) {
+		case float64:
+			if val < 0 || val > 10 {
+				res.Valid = false
+				res.Errors = append(res.Errors, "retry_limit must be between 0 and 10")
+			}
+		case int:
+			if val < 0 || val > 10 {
+				res.Valid = false
+				res.Errors = append(res.Errors, "retry_limit must be between 0 and 10")
+			}
+		}
+	}
+
+	return res
+}
+
+func (h *Handlers) UpdateVersionStatus(c *gin.Context) {
+	id := c.Param("id")
+
+	var req model.UpdateVersionStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+
+	cmdTag, err := h.pg.Exec(ctx, `
+		UPDATE cfg.config_versions
+		SET status = $2
+		WHERE id = $1
+	`, id, req.Status)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if cmdTag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"updated": true})
+}
+
+func (h *Handlers) ValidateVersion(c *gin.Context) {
+	id := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	var mongoVersionID string
+	err := h.pg.QueryRow(ctx, `
+		SELECT mongo_version_id
+		FROM cfg.config_versions
+		WHERE id = $1
+	`, id).Scan(&mongoVersionID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
+		return
+	}
+
+	var doc bson.M
+	err = h.mdb.Collection("config_versions").FindOne(ctx, bson.M{"_id": mongoVersionID}).Decode(&doc)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mongo version not found"})
+		return
+	}
+
+	payload, _ := doc["payload"].(map[string]any)
+	result := validateBusinessRules(payload)
+
+	c.JSON(http.StatusOK, result)
 }

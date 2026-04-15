@@ -13,11 +13,15 @@ func NewRouter(pg *pgxpool.Pool, mdb *mongo.Database) *gin.Engine {
 	h := NewHandlers(pg, mdb)
 
 	r.GET("/health", h.Health)
+
 	r.POST("/v1/templates", h.CreateTemplate)
 	r.GET("/v1/templates", h.ListTemplates)
 
 	r.POST("/v1/versions", h.CreateVersion)
 	r.GET("/v1/versions", h.ListVersions)
+	r.GET("/v1/versions/:id", h.GetVersion)
+	r.PATCH("/v1/versions/:id/status", h.UpdateVersionStatus)
+	r.GET("/v1/versions/:id/validate", h.ValidateVersion)
 
 	return r
 }

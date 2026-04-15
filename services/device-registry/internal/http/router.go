@@ -14,6 +14,7 @@ func NewRouter(pg *pgxpool.Pool) *gin.Engine {
 	r.GET("/health", h.Health)
 	r.POST("/v1/devices", h.CreateDevice)
 	r.GET("/v1/devices", h.ListDevices)
+	r.PATCH("/v1/devices/:id/state", h.UpdateDeviceState)
 
 	return r
 }

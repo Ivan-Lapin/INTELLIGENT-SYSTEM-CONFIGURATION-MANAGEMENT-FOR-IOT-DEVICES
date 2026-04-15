@@ -19,7 +19,8 @@ func NewRouter(d Deps) *gin.Engine {
 	h := NewHandlers(d)
 	r.GET("/health", h.Health)
 	r.POST("/v1/validate", h.Validate)
+	r.POST("/v1/simulate", h.Simulate)
 
-	_ = mongo.ErrNoDocuments // keep import path valid if needed
+	_ = mongo.ErrNoDocuments
 	return r
 }

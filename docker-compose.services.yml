@@ -109,9 +109,10 @@ services:
         condition: service_healthy
 
   ml-service:
+    platform: linux/amd64
     build:
-      context: .
-      dockerfile: services/ml-service/Dockerfile
+      context: ./services/ml-service
+      dockerfile: Dockerfile
     container_name: ml_service
     environment:
       POSTGRES_DSN: ${POSTGRES_DSN}

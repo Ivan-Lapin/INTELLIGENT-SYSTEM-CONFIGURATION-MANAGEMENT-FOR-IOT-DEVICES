@@ -61,6 +61,59 @@ func (h *Handlers) Validate(c *gin.Context) {
 		return
 	}
 
-	resp := twin.Evaluate(latest, cfgDoc.Payload)
+	simReq := model.SimulateRequest{
+		DeviceID:        req.DeviceID,
+		CurrentConfig:   map[string]any{},
+		CandidateConfig: cfgDoc.Payload,
+		TelemetryWindow: model.TelemetryWindowInput{
+			LatencyAvg:    latest.LatencyMs,
+			LatencyP95:    latest.LatencyMs,
+			PacketLossAvg: latest.Loss,
+			JitterAvg:     latest.JitterMs,
+			RSSIAvg:       latest.RSSI,
+			BatteryLevel:  latest.Battery,
+			SampleCount:   1,
+			Window:        "latest",
+		},
+		Deployment: model.DeploymentContextInput{
+			RolloutStrategy: "canary",
+			CanarySize:      10,
+			TargetGroupSize: 10,
+		},
+	}
+
+	resp := twin.EvaluateSimulation(simReq)
+
+	c.JSON(http.StatusOK, gin.H{
+		"valid":     resp.Recommendation != "reject",
+		"riskScore": resp.RiskScore,
+		"reason":    joinReasons(resp.Reasons),
+		"expectedDelta": model.ExpectedDelta{
+			LatencyMs: resp.PredictedLatency - latest.LatencyMs,
+			Loss:      resp.PredictedPacketLoss - latest.Loss,
+			JitterMs:  0,
+			Battery:   -resp.BatteryImpact,
+		},
+		"recommendation": resp.Recommendation,
+		"reasons":        resp.Reasons,
+		"layerScores":    resp.LayerScores,
+	})
+}
+
+func (h *Handlers) Simulate(c *gin.Context) {
+	var req model.SimulateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp := twin.EvaluateSimulation(req)
 	c.JSON(http.StatusOK, resp)
+}
+
+func joinReasons(reasons []string) string {
+	if len(reasons) == 0 {
+		return "configuration is acceptable"
+	}
+	return reasons[0]
 }

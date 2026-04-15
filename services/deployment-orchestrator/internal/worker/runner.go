@@ -19,21 +19,42 @@ import (
 type Runner struct {
 	pg *store.PG
 
-	mqttAdapterURL  string
-	lwm2mAdapterURL string
-	mlServiceURL    string
-	twinServiceURL  string
+	mqttAdapterURL      string
+	lwm2mAdapterURL     string
+	mlServiceURL        string
+	twinServiceURL      string
+	telemetryServiceURL string
 
 	httpClient *http.Client
 }
 
-func NewRunner(pg *store.PG, mqttAdapterURL, lwm2mAdapterURL, mlServiceURL, twinServiceURL string) *Runner {
+type telemetryAggregationItem struct {
+	Window        string  `json:"window"`
+	LatencyAvg    float64 `json:"latency_avg"`
+	PacketLossAvg float64 `json:"packet_loss_avg"`
+}
+
+type telemetryAggregationResponse struct {
+	DeviceID string                     `json:"deviceId"`
+	Items    []telemetryAggregationItem `json:"items"`
+}
+
+type mlPredictResponse struct {
+	DeviceID        string   `json:"deviceId"`
+	RiskProbability float64  `json:"risk_probability"`
+	RiskClass       string   `json:"risk_class"`
+	ModelType       string   `json:"model_type"`
+	TopFeatures     []string `json:"top_features"`
+}
+
+func NewRunner(pg *store.PG, mqttAdapterURL, lwm2mAdapterURL, mlServiceURL, twinServiceURL, telemetryServiceURL string) *Runner {
 	return &Runner{
-		pg:              pg,
-		mqttAdapterURL:  mqttAdapterURL,
-		lwm2mAdapterURL: lwm2mAdapterURL,
-		mlServiceURL:    mlServiceURL,
-		twinServiceURL:  twinServiceURL,
+		pg:                  pg,
+		mqttAdapterURL:      mqttAdapterURL,
+		lwm2mAdapterURL:     lwm2mAdapterURL,
+		mlServiceURL:        mlServiceURL,
+		twinServiceURL:      twinServiceURL,
+		telemetryServiceURL: telemetryServiceURL,
 		httpClient: &http.Client{
 			Timeout: 8 * time.Second,
 		},
@@ -57,21 +78,7 @@ func (r *Runner) run(deploymentID string, req model.CreateDeploymentRequest) err
 		return fmt.Errorf("no deviceIds")
 	}
 
-	if req.Strategy.CanaryPercent <= 0 {
-		req.Strategy.CanaryPercent = 10
-	}
-	if req.Strategy.MaxFailRate <= 0 {
-		req.Strategy.MaxFailRate = 0.1
-	}
-	if req.Strategy.AckWaitSec <= 0 {
-		req.Strategy.AckWaitSec = 5
-	}
-	if req.Strategy.PollIntervalMs <= 0 {
-		req.Strategy.PollIntervalMs = 500
-	}
-	if req.Strategy.MaxMLRisk <= 0 {
-		req.Strategy.MaxMLRisk = 0.6
-	}
+	applyStrategyDefaults(&req.Strategy)
 
 	// defaults
 	if req.Strategy.CanaryPercent <= 0 {
@@ -111,8 +118,41 @@ func (r *Runner) run(deploymentID string, req model.CreateDeploymentRequest) err
 		}
 	}
 
-	if err := r.pg.SetDeploymentStarted(ctx, deploymentID, "CANARY"); err != nil {
+	if err := r.pg.SetDeploymentStarted(ctx, deploymentID, "PRECHECK"); err != nil {
 		return fmt.Errorf("set started: %w", err)
+	}
+
+	var twinRisk *float64
+	var mlRisk *float64
+
+	repDevice := canary[0]
+
+	if req.Strategy.EnableTwin {
+		twinResp, err := r.validateWithTwin(repDevice, req.ConfigVersionId)
+		if err != nil {
+			return fmt.Errorf("digital twin validation failed: %w", err)
+		}
+		twinRisk = &twinResp.RiskScore
+	}
+
+	if req.Strategy.EnableML {
+		mlResp, err := r.predictWithML(repDevice, 12)
+		if err != nil {
+			return fmt.Errorf("ml prediction failed: %w", err)
+		}
+		mlRisk = &mlResp.RiskProbability
+	}
+
+	decision := decidePreDeployment(req.Strategy, twinRisk, mlRisk)
+	log.Printf("[deploy %s] decision action=%s reasons=%v", deploymentID, decision.Action, decision.Reasons)
+
+	if decision.Action == "reject" {
+		_ = r.pg.SetDeploymentFinished(ctx, deploymentID, "FAILED_POLICY")
+		return nil
+	}
+
+	if err := r.pg.UpdateDeploymentStatus(ctx, deploymentID, "CANARY"); err != nil {
+		return fmt.Errorf("set CANARY: %w", err)
 	}
 
 	canarySince := time.Now().UTC()
@@ -129,54 +169,44 @@ func (r *Runner) run(deploymentID string, req model.CreateDeploymentRequest) err
 	log.Printf("[deploy %s] CANARY result applied=%d failed=%d pending=%d failRate=%.3f",
 		deploymentID, canApplied, canFailed, canPending, canFailRate)
 
-	if canFailRate > req.Strategy.MaxFailRate {
+	guard := shouldRollbackByAckFailRate(canFailed, canPending, len(canary), req.Strategy.MaxFailRate)
+	if guard.ShouldRollback {
 		for _, d := range canary {
 			_ = r.pg.MarkTargetStatus(ctx, deploymentID, d, "ROLLED_BACK", "canary fail-rate exceeded")
 		}
 		_ = r.pg.SetDeploymentFinished(ctx, deploymentID, "ROLLED_BACK")
-		log.Printf("[deploy %s] ROLLED_BACK (canary fail-rate)", deploymentID)
 		return nil
 	}
 
-	// Для MVP берём первый canary device как representative device
-	repDevice := canary[0]
-
-	if req.Strategy.EnableTwin {
-		twinResp, err := r.validateWithTwin(repDevice, req.ConfigVersionId)
-		if err != nil {
-			return fmt.Errorf("digital twin validation failed: %w", err)
-		}
-		log.Printf("[deploy %s] twin result valid=%v risk=%.3f reason=%s",
-			deploymentID, twinResp.Valid, twinResp.RiskScore, twinResp.Reason)
-
-		if !twinResp.Valid {
-			for _, d := range canary {
-				_ = r.pg.MarkTargetStatus(ctx, deploymentID, d, "ROLLED_BACK", "digital twin rejected config")
+	if req.Strategy.EnableTelemetryGuard {
+		aggResp, err := r.fetchTelemetryAggregations(repDevice, deploymentID, "canary")
+		if err == nil && len(aggResp.Items) > 0 {
+			var fiveMin *telemetryAggregationItem
+			for _, item := range aggResp.Items {
+				if item.Window == "5m" {
+					tmp := item
+					fiveMin = &tmp
+					break
+				}
 			}
-			_ = r.pg.SetDeploymentFinished(ctx, deploymentID, "FAILED_POLICY")
-			log.Printf("[deploy %s] FAILED_POLICY (digital twin rejected)", deploymentID)
-			return nil
+			if fiveMin != nil {
+				tg := shouldRollbackByTelemetry(
+					req.Strategy,
+					fiveMin.LatencyAvg,
+					fiveMin.PacketLossAvg,
+					guard.OfflineRate,
+				)
+				if tg.ShouldRollback {
+					for _, d := range canary {
+						_ = r.pg.MarkTargetStatus(ctx, deploymentID, d, "ROLLED_BACK", "telemetry guard triggered")
+					}
+					_ = r.pg.SetDeploymentFinished(ctx, deploymentID, "ROLLED_BACK")
+					log.Printf("[deploy %s] ROLLED_BACK telemetry reasons=%v", deploymentID, tg.Reasons)
+					return nil
+				}
+			}
 		}
 	}
-
-	if req.Strategy.EnableML {
-		mlResp, err := r.predictWithML(repDevice, 12)
-		if err != nil {
-			return fmt.Errorf("ml prediction failed: %w", err)
-		}
-		log.Printf("[deploy %s] ml result risk=%.3f level=%s",
-			deploymentID, mlResp.RiskScore, mlResp.RiskLevel)
-
-		if mlResp.RiskScore > req.Strategy.MaxMLRisk {
-			for _, d := range canary {
-				_ = r.pg.MarkTargetStatus(ctx, deploymentID, d, "ROLLED_BACK", "ml predicted high QoS degradation risk")
-			}
-			_ = r.pg.SetDeploymentFinished(ctx, deploymentID, "FAILED_POLICY")
-			log.Printf("[deploy %s] FAILED_POLICY (ml risk too high)", deploymentID)
-			return nil
-		}
-	}
-	// ===== END NEW =====
 
 	if err := r.pg.UpdateDeploymentStatus(ctx, deploymentID, "FULL"); err != nil {
 		return fmt.Errorf("set FULL: %w", err)
@@ -290,13 +320,6 @@ func (r *Runner) validateWithTwin(deviceID, configVersionID string) (*twinValida
 	return &out, nil
 }
 
-type mlPredictResponse struct {
-	DeviceID   string  `json:"deviceId"`
-	WindowSize int     `json:"windowSize"`
-	RiskScore  float64 `json:"riskScore"`
-	RiskLevel  string  `json:"riskLevel"`
-}
-
 func (r *Runner) predictWithML(deviceID string, windowSize int) (*mlPredictResponse, error) {
 	body := map[string]any{
 		"deviceId":   deviceID,
@@ -304,7 +327,7 @@ func (r *Runner) predictWithML(deviceID string, windowSize int) (*mlPredictRespo
 	}
 	b, _ := json.Marshal(body)
 
-	req, _ := http.NewRequest("POST", r.mlServiceURL+"/predict", bytes.NewReader(b))
+	req, _ := http.NewRequest("POST", r.mlServiceURL+"/predict-risk", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.httpClient.Do(req)
@@ -379,4 +402,29 @@ func shuffleDeterministic(a []string, seedStr string) {
 	}
 	r := rand.New(rand.NewSource(seed))
 	r.Shuffle(len(a), func(i, j int) { a[i], a[j] = a[j], a[i] })
+}
+
+func (r *Runner) fetchTelemetryAggregations(deviceID string, rolloutID, phase string) (*telemetryAggregationResponse, error) {
+	req, _ := http.NewRequest(
+		"GET",
+		fmt.Sprintf("%s/v1/telemetry/%s/aggregations?rolloutId=%s&phase=%s",
+			r.telemetryServiceURL, deviceID, rolloutID, phase),
+		nil,
+	)
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("telemetry status=%d", resp.StatusCode)
+	}
+
+	var out telemetryAggregationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }

@@ -40,24 +40,16 @@ func (p *PG) InsertApplyLogResult(ctx context.Context, deviceID, configVersionID
 }
 
 func (p *PG) UpsertAssignment(ctx context.Context, targetType, targetID, configVersionID, status string) error {
-	// targetType: device|group
-	// targetID: device UUID string
 	_, err := p.Pool.Exec(ctx, `
 		INSERT INTO cfg.config_assignments (target_type, target_id, config_version_id, status)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO NOTHING
+		ON CONFLICT (target_type, target_id)
+		DO UPDATE SET
+			config_version_id = EXCLUDED.config_version_id,
+			status = EXCLUDED.status,
+			updated_at = now()
 	`, targetType, targetID, configVersionID, status)
-
-	_, err2 := p.Pool.Exec(ctx, `
-		UPDATE cfg.config_assignments
-		SET config_version_id = $3, status = $4, updated_at = now()
-		WHERE target_type = $1 AND target_id = $2
-	`, targetType, targetID, configVersionID, status)
-
-	if err != nil {
-		return err
-	}
-	return err2
+	return err
 }
 
 func nullIfEmpty(s string) any {

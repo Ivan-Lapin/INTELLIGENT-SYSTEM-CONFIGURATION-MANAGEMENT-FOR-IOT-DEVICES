@@ -1,0 +1,20 @@
+{
+  "name": "smart",
+  "repeats": 3,
+  "devices": 10,
+  "protocol": "mqtt",
+  "simImage": "device-sim-1:latest",
+  "telemetryIntervalSec": 0.3,
+  "preTelemetrySec": 5,
+  "postDeploySec": 6,
+  "configRate": 40,
+  "strategy": {
+    "canaryPercent": 20,
+    "maxFailRate": 0.5,
+    "ackWaitSec": 8,
+    "pollIntervalMs": 300,
+    "enableTwin": true,
+    "enableML": true,
+    "maxMlRisk": 0.005
+  }
+}

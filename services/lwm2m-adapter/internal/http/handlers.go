@@ -37,11 +37,13 @@ func (h *Handlers) PublishDesired(c *gin.Context) {
 
 	var mongoVersionID string
 	var checksum string
+	var version int
+
 	err := h.pg.Pool.QueryRow(ctx, `
-		SELECT mongo_version_id, checksum
+		SELECT mongo_version_id, checksum, version
 		FROM cfg.config_versions
 		WHERE id = $1
-	`, req.ConfigVersionID).Scan(&mongoVersionID, &checksum)
+	`, req.ConfigVersionID).Scan(&mongoVersionID, &checksum, &version)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "config version not found: " + err.Error()})
 		return
@@ -54,18 +56,19 @@ func (h *Handlers) PublishDesired(c *gin.Context) {
 	}
 
 	desired := model.DesiredMessage{
-		DeviceID:  req.DeviceID,
-		VersionID: req.ConfigVersionID,
-		Checksum:  checksum,
-		Payload:   doc.Payload,
-		TS:        time.Now().UTC(),
-		Protocol:  "lwm2m",
+		Version:         version,
+		ConfigVersionID: req.ConfigVersionID,
+		Checksum:        checksum,
+		Payload:         doc.Payload,
+		TS:              time.Now().UTC(),
+		Protocol:        "lwm2m",
 	}
 
 	if err := h.pg.InsertApplyLogSent(ctx, req.DeviceID, req.ConfigVersionID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "apply_log sent: " + err.Error()})
 		return
 	}
+
 	_ = h.pg.UpsertAssignment(ctx, "device", req.DeviceID, req.ConfigVersionID, "desired")
 
 	topic := "lwm2m/desired/" + req.DeviceID

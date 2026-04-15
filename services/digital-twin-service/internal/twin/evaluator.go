@@ -2,7 +2,6 @@ package twin
 
 import (
 	"digital-twin-service/internal/model"
-	"digital-twin-service/internal/store"
 )
 
 func asFloat(v any, def float64) float64 {
@@ -22,76 +21,134 @@ func asFloat(v any, def float64) float64 {
 	}
 }
 
-func Evaluate(latest *store.LatestTelemetry, cfg map[string]any) model.ValidateConfigResponse {
-	// Базовая логика: параметр rate влияет на нагрузку.
-	// Чем меньше интервал/выше частота, тем выше риск роста latency/loss и разряда батареи.
-	// В нашей модели payload["rate"] трактуем как логическую интенсивность отправки.
+func evaluateDeviceTwin(req model.SimulateRequest) (float64, float64, []string) {
+	score := 0.0
+	batteryImpact := 0.0
+	reasons := []string{}
 
-	rate := asFloat(cfg["rate"], 10)
+	currentRate := asFloat(req.CurrentConfig["rate"], 10)
+	candidateRate := asFloat(req.CandidateConfig["rate"], currentRate)
 
-	latDelta := 0.0
-	lossDelta := 0.0
-	jitterDelta := 0.0
-	batteryDelta := 0.0
-	risk := 0.0
-	reason := "configuration is acceptable"
-
-	// Эмпирические правила MVP
-	if rate >= 20 {
-		latDelta += 4.0
-		lossDelta += 0.004
-		jitterDelta += 0.8
-		batteryDelta -= 0.010
-		risk += 0.20
-	}
-	if rate >= 40 {
-		latDelta += 7.0
-		lossDelta += 0.008
-		jitterDelta += 1.2
-		batteryDelta -= 0.020
-		risk += 0.25
+	if candidateRate > currentRate {
+		delta := candidateRate - currentRate
+		score += delta * 0.01
+		batteryImpact += delta * 0.005
+		reasons = append(reasons, "higher telemetry frequency increases device load")
 	}
 
-	// Если текущее состояние уже плохое — twin усиливает риск
-	if latest.LatencyMs > 22 {
-		risk += 0.20
-		latDelta += 2.0
-	}
-	if latest.Loss > 0.02 {
-		risk += 0.20
-		lossDelta += 0.003
-	}
-	if latest.RSSI < -75 {
-		risk += 0.20
-		lossDelta += 0.004
-	}
-	if latest.Battery < 0.20 {
-		risk += 0.20
-		batteryDelta -= 0.020
+	if req.TelemetryWindow.BatteryLevel < 20 {
+		score += 0.20
+		batteryImpact += 0.05
+		reasons = append(reasons, "low battery level")
 	}
 
-	// Ограничиваем
-	if risk > 1.0 {
-		risk = 1.0
+	if candidateRate < 5 && req.TelemetryWindow.BatteryLevel < 20 {
+		score += 0.25
+		reasons = append(reasons, "very aggressive reporting interval on low battery")
 	}
 
-	valid := true
-	if risk >= 0.65 {
-		valid = false
-		reason = "predicted QoS degradation risk is too high"
-	} else if risk >= 0.40 {
-		reason = "configuration is risky but still acceptable"
+	return clamp(score), batteryImpact, reasons
+}
+
+func evaluateNetworkTwin(req model.SimulateRequest) (float64, float64, float64, []string) {
+	score := 0.0
+	predLatency := req.TelemetryWindow.LatencyAvg
+	predLoss := req.TelemetryWindow.PacketLossAvg
+	reasons := []string{}
+
+	currentRate := asFloat(req.CurrentConfig["rate"], 10)
+	candidateRate := asFloat(req.CandidateConfig["rate"], currentRate)
+	rateDelta := candidateRate - currentRate
+
+	if rateDelta > 0 {
+		predLatency += rateDelta * 0.8
+		predLoss += rateDelta * 0.001
+		score += rateDelta * 0.01
+		reasons = append(reasons, "higher rate may increase network latency and packet loss")
 	}
 
-	return model.ValidateConfigResponse{
-		Valid:     valid,
-		RiskScore: risk,
-		Reason:    reason,
-		ExpectedDelta: model.ExpectedDelta{
-			LatencyMs: latDelta,
-			Loss:      lossDelta,
-			JitterMs:  jitterDelta,
-			Battery:   batteryDelta,
+	if req.TelemetryWindow.RSSIAvg < -85 {
+		score += 0.20
+		predLoss += 0.01
+		reasons = append(reasons, "low RSSI")
+	}
+
+	if req.TelemetryWindow.PacketLossAvg > 0.03 {
+		score += 0.20
+		predLoss += 0.005
+		reasons = append(reasons, "already elevated packet loss")
+	}
+
+	if req.TelemetryWindow.LatencyP95 > 50 {
+		score += 0.15
+		predLatency += 3
+		reasons = append(reasons, "high latency p95 baseline")
+	}
+
+	return clamp(score), predLatency, predLoss, reasons
+}
+
+func evaluateDeploymentTwin(req model.SimulateRequest) (float64, []string) {
+	score := 0.0
+	reasons := []string{}
+
+	if req.Deployment.RolloutStrategy == "full" && req.Deployment.TargetGroupSize > 50 {
+		score += 0.25
+		reasons = append(reasons, "full rollout to large target group")
+	}
+
+	if req.Deployment.RolloutStrategy == "canary" && req.Deployment.CanarySize > 20 {
+		score += 0.10
+		reasons = append(reasons, "large canary size")
+	}
+
+	if req.Deployment.RolloutStrategy == "full" && req.Deployment.TargetGroupSize > 100 {
+		score += 0.20
+		reasons = append(reasons, "high deployment blast radius")
+	}
+
+	return clamp(score), reasons
+}
+
+func EvaluateSimulation(req model.SimulateRequest) model.SimulationResponse {
+	deviceScore, batteryImpact, deviceReasons := evaluateDeviceTwin(req)
+	networkScore, predictedLatency, predictedLoss, networkReasons := evaluateNetworkTwin(req)
+	deploymentScore, deploymentReasons := evaluateDeploymentTwin(req)
+
+	total := clamp(deviceScore*0.35 + networkScore*0.45 + deploymentScore*0.20)
+
+	reasons := append([]string{}, deviceReasons...)
+	reasons = append(reasons, networkReasons...)
+	reasons = append(reasons, deploymentReasons...)
+
+	recommendation := "approve"
+	if total >= 0.70 {
+		recommendation = "reject"
+	} else if total >= 0.40 {
+		recommendation = "canary"
+	}
+
+	return model.SimulationResponse{
+		RiskScore:           total,
+		Recommendation:      recommendation,
+		PredictedLatency:    predictedLatency,
+		PredictedPacketLoss: predictedLoss,
+		BatteryImpact:       batteryImpact,
+		Reasons:             reasons,
+		LayerScores: model.LayerScores{
+			DeviceScore:     deviceScore,
+			NetworkScore:    networkScore,
+			DeploymentScore: deploymentScore,
 		},
 	}
+}
+
+func clamp(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }

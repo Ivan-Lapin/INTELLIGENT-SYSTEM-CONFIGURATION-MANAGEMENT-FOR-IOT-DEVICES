@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -11,11 +10,9 @@ import (
 	"time"
 
 	httpx "telemetry-ingestor/internal/http"
-	"telemetry-ingestor/internal/model"
+	"telemetry-ingestor/internal/ingest"
 	"telemetry-ingestor/internal/mqtt"
 	"telemetry-ingestor/internal/store"
-
-	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
 func getenv(key, def string) string {
@@ -50,27 +47,9 @@ func main() {
 	}
 	defer mc.Close()
 
-	err = mc.Subscribe("telemetry/+/metrics", 0, func(_ paho.Client, msg paho.Message) {
-		var ev model.TelemetryEvent
-		if err := json.Unmarshal(msg.Payload(), &ev); err != nil {
-			log.Printf("bad telemetry json topic=%s err=%v", msg.Topic(), err)
-			return
-		}
+	consumer := ingest.NewConsumer(pg)
 
-		if ev.TS.IsZero() {
-			ev.TS = time.Now().UTC()
-		}
-
-		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := pg.InsertTelemetry(cctx, ev); err != nil {
-			log.Printf("insert telemetry failed device=%s err=%v", ev.DeviceID, err)
-			return
-		}
-	})
-
-	if err != nil {
+	if err := consumer.SubscribeTelemetry(mc, "telemetry/+/metrics"); err != nil {
 		log.Fatalf("subscribe telemetry: %v", err)
 	}
 
@@ -90,7 +69,11 @@ func main() {
 	}()
 
 	<-ctx.Done()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
 }

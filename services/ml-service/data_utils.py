@@ -3,32 +3,50 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 
-FEATURES = ["latency_ms", "loss", "jitter_ms", "rssi", "battery"]
+RAW_FEATURES = ["latency_ms", "loss", "jitter_ms", "rssi", "battery"]
+
+TABULAR_FEATURES = [
+    "latency_avg",
+    "latency_std",
+    "latency_p95",
+    "loss_avg",
+    "loss_max",
+    "jitter_avg",
+    "rssi_avg",
+    "battery_avg",
+    "battery_delta",
+    "latency_slope",
+    "loss_slope",
+]
+
+SEQUENCE_FEATURES = RAW_FEATURES
 
 
 def label_qos_degradation(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Примитивная, но честная целевая функция для MVP:
-    1 = деградация QoS
-    если latency > 25ms или loss > 0.03 или rssi < -80 или battery < 0.15
-    """
     df = df.copy()
     df["target"] = (
         (df["latency_ms"] > 25.0) |
         (df["loss"] > 0.03) |
         (df["rssi"] < -80.0) |
-        (df["battery"] < 0.15)
+        (df["battery"] < 20.0)
     ).astype(int)
     return df
 
 
-def make_windows(df: pd.DataFrame, window_size: int = 12):
-    """
-    Из последовательности строк делаем:
-    X shape = [samples, window_size, features]
-    y shape = [samples]
-    """
-    values = df[FEATURES].values
+def fit_scaler(df: pd.DataFrame, features):
+    scaler = StandardScaler()
+    scaler.fit(df[features])
+    return scaler
+
+
+def apply_scaler(df: pd.DataFrame, scaler, features):
+    df = df.copy()
+    df[features] = scaler.transform(df[features])
+    return df
+
+
+def make_sequence_windows(df: pd.DataFrame, window_size: int = 12):
+    values = df[SEQUENCE_FEATURES].values
     targets = df["target"].values
 
     X, y = [], []
@@ -39,13 +57,42 @@ def make_windows(df: pd.DataFrame, window_size: int = 12):
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 
-def fit_scaler(df: pd.DataFrame):
-    scaler = StandardScaler()
-    scaler.fit(df[FEATURES])
-    return scaler
+def _slope(x):
+    if len(x) < 2:
+        return 0.0
+    return float(x.iloc[-1] - x.iloc[0]) / max(1, len(x) - 1)
 
 
-def apply_scaler(df: pd.DataFrame, scaler):
-    df = df.copy()
-    df[FEATURES] = scaler.transform(df[FEATURES])
-    return df
+def build_tabular_dataset(df: pd.DataFrame, window_size: int = 12):
+    rows = []
+
+    for device_id, g in df.groupby("device_id"):
+        g = g.sort_values("ts").reset_index(drop=True)
+        if len(g) <= window_size:
+            continue
+
+        for i in range(len(g) - window_size):
+            window = g.iloc[i:i + window_size]
+            target = int(g.iloc[i + window_size]["target"])
+
+            row = {
+                "device_id": device_id,
+                "target": target,
+                "latency_avg": window["latency_ms"].mean(),
+                "latency_std": window["latency_ms"].std(ddof=0),
+                "latency_p95": window["latency_ms"].quantile(0.95),
+                "loss_avg": window["loss"].mean(),
+                "loss_max": window["loss"].max(),
+                "jitter_avg": window["jitter_ms"].mean(),
+                "rssi_avg": window["rssi"].mean(),
+                "battery_avg": window["battery"].mean(),
+                "battery_delta": float(window["battery"].iloc[-1] - window["battery"].iloc[0]),
+                "latency_slope": _slope(window["latency_ms"]),
+                "loss_slope": _slope(window["loss"]),
+            }
+            rows.append(row)
+
+    if not rows:
+        raise RuntimeError("Not enough telemetry to build tabular dataset")
+
+    return pd.DataFrame(rows)

@@ -1,0 +1,10 @@
+scenario,repeat,protocol,devices,config_rate,deployment_status,applied,failed,rolled_back,pending,failure_rate,avg_latency_before,avg_latency_after,avg_loss_before,avg_loss_after,avg_jitter_before,avg_jitter_after
+baseline,1,mqtt,10,40,DONE,10,0,0,0,0.0,17.1381,15.0125,0.009814,0.010017,3.9313,3.9916
+baseline,2,mqtt,10,40,DONE,8,2,0,0,0.2,17.2651,15.5524,0.010227,0.009722,3.9699,4.0005
+baseline,3,mqtt,10,40,DONE,10,0,0,0,0.0,16.9759,15.2604,0.008947,0.009589,3.9333,3.8795
+canary,1,mqtt,10,40,DONE,9,1,0,0,0.1,16.6686,15.3243,0.010661,0.010307,3.997,4.0978
+canary,2,mqtt,10,40,DONE,10,0,0,0,0.0,16.7943,14.9535,0.00952,0.010276,4.047,3.9817
+canary,3,mqtt,10,40,DONE,10,0,0,0,0.0,17.2192,15.159,0.0094,0.010176,4.0204,3.9875
+smart,1,mqtt,10,40,FAILED_POLICY,0,0,2,8,0.0,16.7375,16.2438,0.0094,0.010425,4.091,3.9606
+smart,2,mqtt,10,40,FAILED_POLICY,0,0,2,8,0.0,16.992,16.5998,0.010502,0.010566,4.0221,3.9806
+smart,3,mqtt,10,40,FAILED_POLICY,0,0,2,8,0.0,16.5797,16.4771,0.009465,0.009837,4.0601,3.9439

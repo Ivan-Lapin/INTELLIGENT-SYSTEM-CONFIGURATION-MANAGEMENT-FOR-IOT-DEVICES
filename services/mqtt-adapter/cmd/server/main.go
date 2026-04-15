@@ -68,6 +68,12 @@ func main() {
 			log.Printf("bad ack json: %v", err)
 			return
 		}
+
+		if ack.ConfigVersionID == "" {
+			log.Printf("ack missing configVersionId for device=%s", ack.DeviceID)
+			return
+		}
+
 		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -75,14 +81,30 @@ func main() {
 		if ack.Status == "APPLIED" {
 			status = "applied"
 		}
-		_ = pg.InsertApplyLogResult(cctx, ack.DeviceID, ack.VersionID, status, ack.Error, ack.TS)
-		_ = pg.UpsertAssignment(cctx, "device", ack.DeviceID, ack.VersionID, status)
+
+		_ = pg.InsertApplyLogResult(cctx, ack.DeviceID, ack.ConfigVersionID, status, ack.Error, ack.TS)
+		_ = pg.UpsertAssignment(cctx, "device", ack.DeviceID, ack.ConfigVersionID, status)
 	})
 
 	// subscribe REPORTED
 	_ = mcMqtt.Subscribe("state/reported/+", 0, func(_ mqttPaho.Client, msg mqttPaho.Message) {
-		// в MVP просто логируем (позже будем писать в state store)
-		log.Printf("reported topic=%s payload=%s", msg.Topic(), string(msg.Payload()))
+		var reported model.ReportedMessage
+		if err := json.Unmarshal(msg.Payload(), &reported); err != nil {
+			log.Printf("bad reported json: %v", err)
+			return
+		}
+
+		log.Printf("reported device=%s version=%d state=%v", reported.DeviceID, reported.Version, reported.State)
+	})
+
+	_ = mcMqtt.Subscribe("telemetry/+", 0, func(_ mqttPaho.Client, msg mqttPaho.Message) {
+		var telemetry model.TelemetryMessage
+		if err := json.Unmarshal(msg.Payload(), &telemetry); err != nil {
+			log.Printf("bad telemetry json topic=%s err=%v", msg.Topic(), err)
+			return
+		}
+
+		log.Printf("telemetry device=%s version=%d metrics=%v", telemetry.DeviceID, telemetry.Version, telemetry.Metrics)
 	})
 
 	deps := httpx.Deps{PG: pg, Mongo: mstore, MQTT: mcMqtt}

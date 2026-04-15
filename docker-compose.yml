@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-iot}
       POSTGRES_DB: ${POSTGRES_DB:-iot}
     ports:
-      - "5432:5432"
+      - "55432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./deployments/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro

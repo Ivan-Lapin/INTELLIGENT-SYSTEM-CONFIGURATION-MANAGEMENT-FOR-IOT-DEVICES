@@ -77,8 +77,13 @@ func main() {
 			status = "applied"
 		}
 
-		_ = pg.InsertApplyLogResult(cctx, ack.DeviceID, ack.VersionID, status, ack.Error, ack.TS)
-		_ = pg.UpsertAssignment(cctx, "device", ack.DeviceID, ack.VersionID, status)
+		if ack.ConfigVersionID == "" {
+			log.Printf("ack missing configVersionId for device=%s", ack.DeviceID)
+			return
+		}
+
+		_ = pg.InsertApplyLogResult(cctx, ack.DeviceID, ack.ConfigVersionID, status, ack.Error, ack.TS)
+		_ = pg.UpsertAssignment(cctx, "device", ack.DeviceID, ack.ConfigVersionID, status)
 	})
 
 	if err != nil {
@@ -90,6 +95,20 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("subscribe reported: %v", err)
+	}
+
+	err = mq.Subscribe("telemetry/+/metrics", 0, func(_ paho.Client, msg paho.Message) {
+		var telemetry model.TelemetryMessage
+		if err := json.Unmarshal(msg.Payload(), &telemetry); err != nil {
+			log.Printf("bad telemetry json topic=%s err=%v", msg.Topic(), err)
+			return
+		}
+
+		log.Printf("telemetry device=%s version=%d metrics=%v protocol=%s",
+			telemetry.DeviceID, telemetry.Version, telemetry.Metrics, telemetry.Protocol)
+	})
+	if err != nil {
+		log.Fatalf("subscribe telemetry: %v", err)
 	}
 
 	router := httpx.NewRouter(httpx.Deps{

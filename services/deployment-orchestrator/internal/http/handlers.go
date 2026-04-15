@@ -32,7 +32,7 @@ func (h *Handlers) CreateDeployment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	// defaults
+
 	if req.Strategy.CanaryPercent <= 0 {
 		req.Strategy.CanaryPercent = 10
 	}
@@ -45,6 +45,21 @@ func (h *Handlers) CreateDeployment(c *gin.Context) {
 	if req.Strategy.PollIntervalMs <= 0 {
 		req.Strategy.PollIntervalMs = 500
 	}
+	if req.Strategy.MaxTwinRisk <= 0 {
+		req.Strategy.MaxTwinRisk = 0.8
+	}
+	if req.Strategy.CanaryTwinRisk <= 0 {
+		req.Strategy.CanaryTwinRisk = 0.5
+	}
+	if req.Strategy.MaxLatencyThreshold <= 0 {
+		req.Strategy.MaxLatencyThreshold = 50
+	}
+	if req.Strategy.MaxPacketLoss <= 0 {
+		req.Strategy.MaxPacketLoss = 0.05
+	}
+	if req.Strategy.MaxOfflineRate <= 0 {
+		req.Strategy.MaxOfflineRate = 0.2
+	}
 
 	id, err := h.pg.CreateDeployment(c.Request.Context(), req.ConfigVersionId, req.Strategy)
 	if err != nil {
@@ -52,7 +67,6 @@ func (h *Handlers) CreateDeployment(c *gin.Context) {
 		return
 	}
 
-	// стартуем асинхронно
 	h.r.Start(id, req)
 
 	c.JSON(http.StatusCreated, model.CreateDeploymentResponse{
