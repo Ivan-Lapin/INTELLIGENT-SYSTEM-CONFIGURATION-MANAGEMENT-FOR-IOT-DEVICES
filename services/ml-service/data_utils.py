@@ -24,12 +24,14 @@ SEQUENCE_FEATURES = RAW_FEATURES
 
 def label_qos_degradation(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
     df["target"] = (
-        (df["latency_ms"] > 25.0) |
-        (df["loss"] > 0.03) |
-        (df["rssi"] < -80.0) |
-        (df["battery"] < 20.0)
+        (df["latency_ms"] > 24.0) |
+        (df["loss"] > 0.017) |
+        (df["rssi"] < -69.0) |
+        (df["battery"] < 25.0)
     ).astype(int)
+
     return df
 
 
@@ -96,3 +98,35 @@ def build_tabular_dataset(df: pd.DataFrame, window_size: int = 12):
         raise RuntimeError("Not enough telemetry to build tabular dataset")
 
     return pd.DataFrame(rows)
+
+def build_single_tabular_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    def _safe_std(series):
+        v = series.std(ddof=0)
+        return 0.0 if pd.isna(v) else float(v)
+
+    def _safe_quantile(series, q):
+        v = series.quantile(q)
+        return 0.0 if pd.isna(v) else float(v)
+
+    def _slope(series):
+        if len(series) < 2:
+            return 0.0
+        return float(series.iloc[-1] - series.iloc[0]) / max(1, len(series) - 1)
+
+    row = {
+        "latency_avg": float(df["latency_ms"].mean()),
+        "latency_std": _safe_std(df["latency_ms"]),
+        "latency_p95": _safe_quantile(df["latency_ms"], 0.95),
+        "loss_avg": float(df["loss"].mean()),
+        "loss_max": float(df["loss"].max()),
+        "jitter_avg": float(df["jitter_ms"].mean()),
+        "rssi_avg": float(df["rssi"].mean()),
+        "battery_avg": float(df["battery"].mean()),
+        "battery_delta": float(df["battery"].iloc[-1] - df["battery"].iloc[0]),
+        "latency_slope": _slope(df["latency_ms"]),
+        "loss_slope": _slope(df["loss"]),
+    }
+
+    return pd.DataFrame([row])

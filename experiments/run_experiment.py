@@ -83,8 +83,11 @@ def pg_conn():
 
 def create_device(protocol: str, run_id: str, n: int):
     payload = {
-        "deviceType": "sensor-v1",
+        "external_id": f"{run_id}-dev-{n}",
+        "device_type": "sensor-v1",
         "protocol": protocol,
+        "network_profile": "wifi",
+        "location_zone": "lab",
         "tags": {"run": run_id, "n": n},
     }
     data = http_json("POST", f"{BASE_URLS['device_registry']}/v1/devices", payload)

@@ -1,18 +1,11 @@
 import os
 import pandas as pd
 import psycopg2
-import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
-from data_utils import (
-    RAW_FEATURES,
-    TABULAR_FEATURES,
-    SEQUENCE_FEATURES,
-    apply_scaler,
-    build_tabular_dataset,
-)
+from data_utils import TABULAR_FEATURES, build_single_tabular_features
 from inference_utils import load_best_model, top_feature_payload
 
 POSTGRES_DSN = os.getenv(
@@ -70,8 +63,7 @@ def risk_class(prob: float) -> str:
 
 def load_artifacts():
     global loaded_model, loaded_scaler, loaded_meta
-
-    model, scaler, meta = load_best_model(MODEL_DIR, len(SEQUENCE_FEATURES))
+    model, scaler, meta = load_best_model(MODEL_DIR)
     loaded_model = model
     loaded_scaler = scaler
     loaded_meta = meta
@@ -120,38 +112,20 @@ def predict_risk(req: PredictRiskRequest):
             df = fetch_recent_window(req.deviceId, req.windowSize)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"telemetry fetch error: {e}")
     else:
         raise HTTPException(status_code=400, detail="either deviceId or telemetryWindow is required")
 
-    model_type = loaded_meta["best_model_type"]
+    if len(df) < req.windowSize:
+        raise HTTPException(status_code=400, detail="not enough rows for inference")
 
-    if model_type == "lstm":
-        if len(df) < req.windowSize:
-            raise HTTPException(status_code=400, detail="not enough rows for LSTM inference")
+    if "ts" not in df.columns:
+        df["ts"] = pd.RangeIndex(start=0, stop=len(df), step=1)
 
-        df_scaled = apply_scaler(df, loaded_scaler, SEQUENCE_FEATURES)
-        x = torch.tensor(df_scaled[SEQUENCE_FEATURES].values, dtype=torch.float32).unsqueeze(0)
-
-        with torch.no_grad():
-            risk = float(loaded_model(x).item())
-    else:
-        if len(df) < req.windowSize:
-            raise HTTPException(status_code=400, detail="not enough rows for tabular inference")
-
-        df["device_id"] = req.deviceId or "ad-hoc"
-        if "ts" not in df.columns:
-            df["ts"] = pd.RangeIndex(start=0, stop=len(df), step=1)
-        if "target" not in df.columns:
-            df["target"] = 0
-
-        tab_df = build_tabular_dataset(df, window_size=req.windowSize)
-        if tab_df.empty:
-            raise HTTPException(status_code=400, detail="unable to build tabular features")
-
-        X = tab_df[TABULAR_FEATURES].tail(1)
-        X_scaled = loaded_scaler.transform(X)
-
-        risk = float(loaded_model.predict_proba(X_scaled)[:, 1][0])
+    X = build_single_tabular_features(df)[TABULAR_FEATURES]
+    X_scaled = loaded_scaler.transform(X)
+    risk = float(loaded_model.predict_proba(X_scaled)[:, 1][0])
 
     return {
         "deviceId": req.deviceId,

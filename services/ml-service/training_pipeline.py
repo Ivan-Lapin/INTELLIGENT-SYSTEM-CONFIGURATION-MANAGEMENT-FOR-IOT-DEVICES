@@ -5,12 +5,12 @@ import joblib
 import numpy as np
 import pandas as pd
 import psycopg2
-import torch
-import torch.nn as nn
+# import torch
+# import torch.nn as nn
 
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
-from torch.utils.data import TensorDataset, DataLoader
+# from torch.utils.data import TensorDataset, DataLoader
 
 from data_utils import (
     RAW_FEATURES,
@@ -23,7 +23,6 @@ from data_utils import (
     build_tabular_dataset,
 )
 from model import (
-    QoSLSTM,
     build_logistic_regression,
     build_random_forest,
     build_gradient_boosting,
@@ -85,6 +84,16 @@ def train_lstm(df):
 
     X = np.concatenate(X_all, axis=0)
     y = np.concatenate(y_all, axis=0)
+    
+    y_series = pd.Series(y)
+    class_counts = y_series.value_counts().to_dict()
+    print(f"[lstm] target distribution: {class_counts}")
+
+    if y_series.nunique() < 2:
+        raise RuntimeError(
+            f"Training dataset for lstm contains only one class: {class_counts}. "
+            "Need both normal and degradation samples."
+        )
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
@@ -131,6 +140,15 @@ def train_tabular_model(df, model_type, builder):
 
     X = tab_df[TABULAR_FEATURES]
     y = tab_df["target"]
+    
+    class_counts = y.value_counts().to_dict()
+    print(f"[{model_type}] target distribution: {class_counts}")
+
+    if y.nunique() < 2:
+        raise RuntimeError(
+            f"Training dataset for {model_type} contains only one class: {class_counts}. "
+            "Need both normal and degradation samples."
+        )
 
     scaler = fit_scaler(tab_df, TABULAR_FEATURES)
     X_scaled = scaler.transform(X)
@@ -213,13 +231,16 @@ def save_artifacts(results):
 def run_training_pipeline():
     df = load_data()
     df = label_qos_degradation(df)
+    
+    
 
     results = []
 
     results.append(train_tabular_model(df, "logistic_regression", build_logistic_regression))
     results.append(train_tabular_model(df, "random_forest", build_random_forest))
     results.append(train_tabular_model(df, "gradient_boosting", build_gradient_boosting))
-    results.append(train_lstm(df))
+    # LSTM temporarily disabled due to runtime instability under container emulation
+    # results.append(train_lstm(df))
 
     leaderboard, metadata = save_artifacts(results)
     return leaderboard, metadata
